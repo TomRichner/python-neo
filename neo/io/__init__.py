@@ -41,6 +41,7 @@ Classes:
 * :attr:`MaxwellIO`
 * :attr:`MedIO`
 * :attr:`MicromedIO`
+* :attr:`NatusIO`
 * :attr:`NeoMatlabIO`
 * :attr:`NestIO`
 * :attr:`NeuralynxIO`
@@ -173,6 +174,10 @@ Classes:
     .. autoattribute:: extensions
 
 .. autoclass:: neo.io.MicromedIO
+
+    .. autoattribute:: extensions
+
+.. autoclass:: neo.io.NatusIO
 
     .. autoattribute:: extensions
 
@@ -320,6 +325,7 @@ from neo.io.mearecio import MEArecIO
 from neo.io.maxwellio import MaxwellIO
 from neo.io.medio import MedIO
 from neo.io.micromedio import MicromedIO
+from neo.io.natusio import NatusIO
 from neo.io.neomatlabio import NeoMatlabIO
 from neo.io.nestio import NestIO
 from neo.io.neuralynxio import NeuralynxIO
@@ -375,6 +381,7 @@ iolist = [
     MaxwellIO,
     MedIO,
     MicromedIO,
+    NatusIO,
     NixIO,
     NixIOFr,
     NeoMatlabIO,

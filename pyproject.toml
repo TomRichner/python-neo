@@ -104,7 +104,8 @@ maxwell = ["h5py"]
 biocam = ["h5py"]
 med = ["dhn_med_py<2.0"] # ci failing with 2.0 test future version when stable
 plexon2 = ["zugbruecke>=0.2; sys_platform!='win32'", "wenv; sys_platform!='win32'"]
-neuralynx = ["python-dateutil"] 
+neuralynx = ["python-dateutil"]
+natus = ["numba"]
 
 all = [
     "coverage",
@@ -117,6 +118,7 @@ all = [
     "klusta",
     "matplotlib",
     "nixio>=1.5.0",
+    "numba",
     "pillow",
     "probeinterface",
     "pyedflib",
