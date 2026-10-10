@@ -79,6 +79,10 @@ class NatusRawIO(BaseRawIO):
 
     extensions = ["erd"]
     rawmode = "one-dir"
+    # Signal reads share no mutable state: the layout is built once in _parse_header, and
+    # each read does its own np.fromfile and decodes with fresh state arrays. Callers may
+    # run get_analogsignal_chunk from several threads at once.
+    thread_safe_reads = True
 
     def __init__(self, dirname: str | Path = ""):
         if not HAVE_NUMBA:
