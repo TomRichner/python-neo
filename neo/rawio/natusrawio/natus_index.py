@@ -3,8 +3,9 @@ Recording layout of a Natus/XLTEK session: continuous segments and where their
 samples are stored.
 
 Port of ``xlteknatustomat/segment_builder.build_segments`` with one addition:
-the sample rate and channel layout are read from every ``.erd`` header, and a
-change starts a new segment (a discontinuity of zero length).
+the sample rate and channel layout (recorded channels, discard bits, headbox type)
+are read from every ``.erd`` header, and a change starts a new segment (a
+discontinuity of zero length).
 
 * Entries of all ``.etc`` files are sorted by samplestamp.
 * Samples per entry: the difference of consecutive ``sample_num`` within one
@@ -52,7 +53,16 @@ class ErdFile:
     @property
     def stream_key(self):
         h = self.header
-        return (float(h.sample_freq), h.num_recorded_chans, h.discard_bits, tuple(h.rec_to_phys_map))
+        # (rate, recorded channels, discard bits, physical channel of each recorded channel,
+        # headbox type, physical channels): files with the same key share names and gains
+        return (
+            float(h.sample_freq),
+            h.num_recorded_chans,
+            h.discard_bits,
+            tuple(h.rec_to_phys_map),
+            h.headbox_type,
+            h.num_channels,
+        )
 
 
 @dataclass

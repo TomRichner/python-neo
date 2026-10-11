@@ -13,8 +13,17 @@ Neo model:
 * one signal stream per distinct (sample rate, channel layout), id such as
   ``"512Hz"``. A stream has samples only in the segments recorded with its
   rate; in the others its size is 0.
-* signals are int32 counts; gain ``8711 / (2**21 - 0.5) * 2**discard_bits``
-  gives microvolts.
+* signals are int32 counts. Amplifier (EEG) inputs have the gain
+  ``8711 / (2**21 - 0.5) * 2**discard_bits`` and units uV; DC inputs (mV), oximetry
+  (SpO2 in %, pulse rate in bpm), pleth (mV) and trigger channels have their own gain
+  per headbox type (``natus_channels``). The kind of each channel is the signal array
+  annotation ``natus_channel_kind``: "eeg" (any amplifier input, including ECG, EOG and
+  EMG leads and unconnected inputs), "dc", "trigger", "oximetry", "pulse" or "pleth".
+* channel names come from the last ``ChanNames`` list of the ``.ent``, mapped to the
+  physical channels per headbox type (on a Quantum, the auxiliary channels DC1-DC16,
+  TRIG, OSAT, PR and Pleth are named from the end of the list).
+* ``.erd`` schemas other than 8 and 9 are refused (ValueError); a channel whose
+  ``frequency_factor`` is not 32767 (recorded at another rate) is logged as a warning.
 * time is in seconds from the start of the first segment (so segment 0 starts
   at 0.0); the absolute start is ``rec_datetime`` (UTC) in the block and
   segment annotations.
@@ -46,6 +55,7 @@ from ..baserawio import (
     _event_channel_dtype,
 )
 from .erd_decode import HAVE_NUMBA
+from .natus_channels import channel_table
 from .natus_files import (
     CLIP_TYPES,
     COMMENT_TYPE,
@@ -121,9 +131,10 @@ class NatusRawIO(BaseRawIO):
 
         signal_streams = []
         signal_channels = []
+        self._stream_kinds = []  # per stream: natus_channel_kind of each channel
         used_ids = set()
         for key in stream_keys:
-            rate, n_rec, discard_bits, rec_to_phys = key
+            rate, n_rec, discard_bits, rec_to_phys, headbox_type, n_phys = key
             stream_id = f"{rate:g}Hz"
             k = 2
             while stream_id in used_ids:
@@ -131,15 +142,19 @@ class NatusRawIO(BaseRawIO):
                 k += 1
             used_ids.add(stream_id)
             signal_streams.append((f"{rate:g} Hz ({n_rec} ch)", stream_id, ""))
-            gain = (8711 / (2**21 - 0.5)) * 2**discard_bits
+            table = channel_table(headbox_type, n_phys, discard_bits, montage)
+            kinds = []
             for i, phys in enumerate(rec_to_phys):
-                if montage and phys - 1 < len(montage):
-                    name = montage[phys - 1]
+                pname, kind, gain, units = table[phys - 1]
+                if pname:
+                    name = pname
                 elif montage:
                     name = f"ch{phys:03d}"
                 else:
                     name = f"ch{i + 1:03d}"
-                signal_channels.append((name, str(phys), rate, "int32", "uV", gain, 0.0, stream_id, ""))
+                kinds.append(kind)
+                signal_channels.append((name, str(phys), rate, "int32", units, gain, 0.0, stream_id, ""))
+            self._stream_kinds.append(kinds)
 
         signal_streams = np.array(signal_streams, dtype=_signal_stream_dtype)
         signal_channels = np.array(signal_channels, dtype=_signal_channel_dtype)
@@ -172,6 +187,10 @@ class NatusRawIO(BaseRawIO):
             seg_ann["rec_datetime"] = datetime.fromtimestamp(seg.t_start_posix, tz=timezone.utc)
             seg_ann["natus_rate"] = seg.rate
             seg_ann["natus_stream_id"] = str(signal_streams[self._seg_stream[seg_index]]["id"])
+            for stream_index, key in enumerate(stream_keys):
+                sig_ann = seg_ann["signals"][stream_index]
+                sig_ann["natus_headbox_type"] = key[4]
+                sig_ann["__array_annotations__"]["natus_channel_kind"] = np.array(self._stream_kinds[stream_index])
 
     def _read_events(self, ent_bytes):
         """Clips and comments from the .ent, in seconds of the time base."""

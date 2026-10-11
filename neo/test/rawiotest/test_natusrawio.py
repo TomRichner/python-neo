@@ -305,17 +305,120 @@ def test_known_values():
     assert comments == {"ResearchComment", "ResearchComment2"}
 
 
+def channel_kinds(reader, stream_index=0, seg_index=0):
+    seg_ann = reader.raw_annotations["blocks"][0]["segments"][seg_index]
+    return list(seg_ann["signals"][stream_index]["__array_annotations__"]["natus_channel_kind"])
+
+
+QUANTUM_AUX = [f"DC{i}" for i in range(1, 17)] + ["TRIG", "OSAT", "PR", "Pleth"]
+QUANTUM_AUX_KINDS = ["dc"] * 16 + ["trigger", "oximetry", "pulse", "pleth"]
+EEG_GAIN_D6 = 8711 / (2**21 - 0.5) * 2**6
+DC_GAIN_D6_MV = 10_800_000 / 65536 / 2**6 * 2**6 / 1000
+
+
 def test_units_gain_and_names():
     r = get_reader("85ba4df1")
     ch = r.header["signal_channels"]
-    assert set(ch["units"]) == {"uV"}
+    kinds = np.array(channel_kinds(r))
+    eeg = kinds == "eeg"
+    assert eeg.sum() == 256
+    assert set(ch["units"][eeg]) == {"uV"}
     assert set(ch["dtype"]) == {"int32"}
     hdr = r._layout.files[0].header
-    np.testing.assert_allclose(ch["gain"], 8711 / (2**21 - 0.5) * 2**hdr.discard_bits)
+    np.testing.assert_allclose(ch["gain"][eeg], 8711 / (2**21 - 0.5) * 2**hdr.discard_bits)
     assert np.all(ch["offset"] == 0)
     assert ch["name"][0] == "LA1"  # from the .ent montage
     assert r.segment_t_start(0, 0) == 0.0
     assert r.raw_annotations["blocks"][0]["rec_datetime"].tzinfo is not None
+
+
+@pytest.mark.parametrize("key", ["85ba4df1", "426dd159", "662aafc9"])
+def test_quantum_aux_channels(key):
+    """Headbox 20 (Quantum): 256 amplifier inputs, then DC1-16, TRIG, OSAT, PR, Pleth,
+    named from the end of the 532-name ChanNames list."""
+    r = get_reader(key)
+    ch = r.header["signal_channels"]
+    assert r._layout.files[0].header.headbox_type == 20
+    assert len(ch) == 276
+    assert list(ch["name"][256:]) == QUANTUM_AUX
+    assert not any(n[:1] == "C" and n[1:].isdigit() and int(n[1:]) > 256 for n in ch["name"])
+    kinds = channel_kinds(r)
+    assert kinds == ["eeg"] * 256 + QUANTUM_AUX_KINDS
+    assert list(ch["units"][256:]) == ["mV"] * 16 + ["", "%", "bpm", "mV"]
+    np.testing.assert_allclose(ch["gain"][:256], EEG_GAIN_D6)
+    np.testing.assert_allclose(ch["gain"][256:272], DC_GAIN_D6_MV)
+    np.testing.assert_allclose(ch["gain"][272:276], [1.0, 1.0, 1.0, DC_GAIN_D6_MV])
+    ann = r.raw_annotations["blocks"][0]["segments"][0]["signals"][0]
+    assert ann["natus_headbox_type"] == 20
+    # the samples: flat DC offsets, TRIG 511, no oximeter (131070), Pleth 0
+    x = r.get_analogsignal_chunk(0, 0, 0, 2000, stream_index=seg_stream(r, 0), channel_indexes=range(256, 276))
+    assert np.all(x[:, 0:16].std(axis=0) < 10)
+    assert np.all(x[:, 16] == 511)
+    assert np.all(x[:, 17:19] == 131070)
+    assert np.all(x[:, 19] == 0)
+
+
+def test_headbox_17_aux_channels():
+    r = get_reader("42a53fa4")
+    ch = r.header["signal_channels"]
+    assert r._layout.files[0].header.headbox_type == 17
+    assert list(ch["name"][40:]) == ["DC1", "DC2", "DC3", "DC4", "O2Sat", "HR"]
+    assert list(ch["name"][31:40]) == ["ECG", "X11", "X12", "X13", "X14", "X15", "X16", "X17", "X18"]
+    assert channel_kinds(r) == ["eeg"] * 40 + ["dc"] * 4 + ["oximetry", "pulse"]
+    assert list(ch["units"]) == ["uV"] * 40 + ["mV"] * 4 + ["%", "bpm"]
+    np.testing.assert_allclose(ch["gain"][:40], EEG_GAIN_D6)
+    np.testing.assert_allclose(ch["gain"][40:44], DC_GAIN_D6_MV)
+    np.testing.assert_allclose(ch["gain"][44:], 1.0)
+    # every segment carries the kinds
+    for s in range(r.segment_count(0)):
+        assert channel_kinds(r, 0, s) == channel_kinds(r)
+
+
+def test_rate_change_session_kinds():
+    r = get_reader("c0fe2d81")
+    for k in range(r.signal_streams_count()):
+        assert channel_kinds(r, k) == ["eeg"] * 40 + ["dc"] * 4 + ["oximetry", "pulse"]
+        chans = r.header["signal_channels"]
+        chans = chans[chans["stream_id"] == r.header["signal_streams"][k]["id"]]
+        assert list(chans["name"][40:]) == ["DC1", "DC2", "DC3", "DC4", "O2Sat", "HR"]
+
+
+AUX_NAME = {"dc": r"DC\d+", "trigger": "TRIG", "oximetry": "OSAT|O2Sat|SpO2", "pulse": "PR|HR", "pleth": "Pleth"}
+
+
+def _all_session_dirs():
+    dirs = []
+    for root in [Path(SAMPLE_ROOT) / "Natus_deident1", Path(SAMPLE_ROOT) / "Natus_deident2"] + (
+        [Path(DEV_ROOT)] if DEV_ROOT else []
+    ):
+        if root.is_dir():
+            dirs += sorted(p for p in root.iterdir() if p.is_dir() and any(p.glob("*.erd")))
+    return dirs
+
+
+def test_every_session_kinds_match_names():
+    """Every local sample (and dev) session: one kind per channel, aux kinds carry aux names."""
+    import re
+
+    from neo.rawio import NatusRawIO
+
+    if not HAVE_NUMBA:
+        pytest.skip("numba not installed")
+    dirs = _all_session_dirs()
+    assert dirs
+    for d in dirs:
+        r = NatusRawIO(dirname=d)
+        r.parse_header()
+        for k in range(r.signal_streams_count()):
+            chans = r.header["signal_channels"]
+            chans = chans[chans["stream_id"] == r.header["signal_streams"][k]["id"]]
+            kinds = channel_kinds(r, k)
+            assert len(kinds) == len(chans)
+            for name, kind in zip(chans["name"], kinds):
+                if kind == "eeg":
+                    assert not re.fullmatch(r"DC\d+|TRIG|OSAT|O2Sat|PR|HR|Pleth", name), (d.name, name)
+                else:
+                    assert re.fullmatch(AUX_NAME[kind], name), (d.name, name, kind)
 
 
 def test_empty_range_shape():
@@ -373,6 +476,10 @@ def test_neo_io_read_block():
     io = NatusIO(dirname=d)
     block = io.read_block(lazy=True)
     assert len(block.segments) == 24
-    sig = block.segments[0].analogsignals[0].load(time_slice=None)
-    assert sig.shape == (19000, 46)
+    # one AnalogSignal per unit: 40 amplifier inputs (uV), DC1-4 (mV), O2Sat (%), HR (bpm)
+    sigs = block.segments[0].analogsignals
+    assert [s.shape[1] for s in sigs] == [40, 4, 1, 1]
+    sig = sigs[0].load(time_slice=None)
+    assert sig.shape == (19000, 40)
     assert str(sig.units.dimensionality) == "uV"
+    assert str(sigs[1].load(time_slice=None).units.dimensionality) == "mV"

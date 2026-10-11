@@ -21,6 +21,7 @@ Every file starts with a 352-byte generic header.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import struct
@@ -29,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 GENERIC_HEADER_END = 352
 
@@ -41,7 +44,14 @@ ERD_DELTA_BITS_OFFSET = 364
 ERD_HEADBOX_TYPE_ARRAY_OFFSET = 4464
 ERD_DISCARD_BITS_OFFSET = 4556
 ERD_SHORTED_CHANS_OFFSET = 4560
+ERD_FREQUENCY_FACTOR_OFFSET = 6608
 SAMPLE_PACKET_OFFSET = 8656
+# Schemas 8 and 9 share the packet layout decoded here (delta mask, 0xFFFF escape);
+# schema 7 has a 1-byte escape and no delta mask (Wonambi ktlx notes).
+SUPPORTED_ERD_SCHEMAS = {8, 9}
+# frequency_factor of a channel recorded at the file's sample rate; any other value
+# means a channel at a different rate, with a frequency byte in each packet (not decoded).
+FULL_RATE_FREQUENCY_FACTOR = 32767
 
 # .etc
 ETC_SCHEMA_OFFSET = 16
@@ -79,6 +89,8 @@ class ErdHeader:
     delta_bits: int
     discard_bits: int
     rec_to_phys_map: list[int]  # 1-based physical channel of each recorded channel
+    headbox_type: int = 0  # first of the four headbox types (offset 4464)
+    frequency_factor: tuple[int, ...] = ()  # per physical channel (offset 6608)
 
     @property
     def num_recorded_chans(self) -> int:
@@ -96,6 +108,10 @@ def read_erd_header(erd_path) -> ErdHeader:
     if len(h) < SAMPLE_PACKET_OFFSET:
         raise ValueError(f"ERD file too small for its header: {erd_path}")
     file_schema = struct.unpack_from("<H", h, ERD_FILE_SCHEMA_OFFSET)[0]
+    if file_schema not in SUPPORTED_ERD_SCHEMAS:
+        raise ValueError(
+            f"Unsupported ERD schema {file_schema} in {erd_path} (supported: {sorted(SUPPORTED_ERD_SCHEMAS)})"
+        )
     creation_raw = struct.unpack_from("<I", h, ERD_CREATION_TIME_OFFSET)[0]
     try:
         creation_time = datetime.fromtimestamp(creation_raw, tz=timezone.utc)
@@ -108,6 +124,19 @@ def read_erd_header(erd_path) -> ErdHeader:
     n_short = min(num_channels, 1024)
     shorted = struct.unpack_from(f"<{n_short}h", h, ERD_SHORTED_CHANS_OFFSET)
     rec_to_phys_map = [i + 1 for i in range(n_short) if shorted[i] == 0]
+    headbox_type = struct.unpack_from("<i", h, ERD_HEADBOX_TYPE_ARRAY_OFFSET)[0]
+    frequency_factor = struct.unpack_from(f"<{n_short}h", h, ERD_FREQUENCY_FACTOR_OFFSET)
+    odd = [i + 1 for i in range(n_short) if shorted[i] == 0 and frequency_factor[i] != FULL_RATE_FREQUENCY_FACTOR]
+    if odd:
+        logger.warning(
+            "%s: frequency_factor is not %d for %d channel(s) (first: physical channel %d, value %d); "
+            "channels at another rate are not supported and their samples may be wrong",
+            Path(erd_path).name,
+            FULL_RATE_FREQUENCY_FACTOR,
+            len(odd),
+            odd[0],
+            frequency_factor[odd[0] - 1],
+        )
     return ErdHeader(
         file_schema=file_schema,
         creation_time=creation_time,
@@ -116,6 +145,8 @@ def read_erd_header(erd_path) -> ErdHeader:
         delta_bits=delta_bits,
         discard_bits=discard_bits,
         rec_to_phys_map=rec_to_phys_map,
+        headbox_type=headbox_type,
+        frequency_factor=tuple(frequency_factor),
     )
 
 
