@@ -104,8 +104,19 @@ class NatusLayout:
             if etc is None:
                 logger.warning("No .etc file for %s, skipping it", erd.name)
                 continue
-            header = read_erd_header(erd)
             table = read_etc_file(etc)
+            if len(table) == 0:
+                # A stub the recorder left behind: an .erd of a few KB that stops inside
+                # its own header, an .etc of header only, no .stc row. It holds no
+                # samples, so it is left out without reading its (unreadable) header.
+                logger.warning("%s has no .etc entries; it holds no indexed samples and is skipped", erd.name)
+                continue
+            try:
+                header = read_erd_header(erd)
+            except ValueError as e:
+                # The .etc says samples are there: a bad header is an error, never a
+                # silent hole in the timeline.
+                raise ValueError(f"{erd.name} is indexed by its .etc but its header cannot be read: {e}") from e
             self.files.append(
                 ErdFile(
                     path=erd,
