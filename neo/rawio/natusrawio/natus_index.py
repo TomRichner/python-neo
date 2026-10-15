@@ -18,6 +18,12 @@ discontinuity of zero length).
 * Segment start time from ``.snc`` (samplestamp interpolation at the segment's
   rate), else the ``.erd`` creation time.
 * When a segment starts before the previous one ends, its start is trimmed.
+* An ``.erd`` of decimated monitoring data saved from outside a recording (before
+  "Start Recording" or between two) is left out and listed in
+  ``NatusLayout.unrecorded``: NeuroWorks writes it with one ``.etc`` entry per
+  stored sample while the stamp steps by k > 1 (k = 4: 512 Hz samples on a 2048 Hz
+  stamp clock), and the values are low-pass filtered, as in the session's
+  ``Decimated/`` copy. It is not part of the recording.
 """
 
 from __future__ import annotations
@@ -87,6 +93,40 @@ class _RawSegment:
     trimmed: int = 0
 
 
+# Share of consecutive .etc entries that must show the same stamp step for a file to
+# count as unrecorded data; the rest are real breaks inside it.
+UNRECORDED_MIN_SHARE = 0.9
+
+
+def unrecorded_stamp_step(stamps, sample_nums) -> int:
+    """k when one file's .etc entries are those of decimated monitoring data, else 0.
+
+    Unrecorded data steps ``sample_num`` by 1 at every entry (one sample per entry) and
+    the stamp by the same k > 1 at most entries; recorded data steps ``sample_num`` by
+    about 1000 per entry.
+    """
+    stamps = np.asarray(stamps, dtype=np.int64)
+    nums = np.asarray(sample_nums, dtype=np.int64)
+    if stamps.size < 2 or not np.all(np.diff(nums) == 1):
+        return 0
+    values, counts = np.unique(np.diff(stamps), return_counts=True)
+    k = int(values[np.argmax(counts)])
+    if k > 1 and counts.max() >= UNRECORDED_MIN_SHARE * (stamps.size - 1):
+        return k
+    return 0
+
+
+@dataclass
+class UnrecordedFile:
+    """An .erd of decimated monitoring data from outside a recording, left out."""
+
+    path: Path
+    start_stamp: int  # stamp of the first stored sample
+    end_stamp: int  # stamp just after the last stored sample
+    n_samples: int
+    stamp_step: int  # k: stamps per stored sample
+
+
 class NatusLayout:
     """Files, segments and sync table of one session folder."""
 
@@ -99,6 +139,7 @@ class NatusLayout:
 
         self.files: list[ErdFile] = []
         self._etc_tables: list[np.ndarray] = []
+        self.unrecorded: list[UnrecordedFile] = []
         for erd in listing.erd:
             etc = listing.etc.get(erd.stem.lower())
             if etc is None:
@@ -110,6 +151,20 @@ class NatusLayout:
                 # its own header, an .etc of header only, no .stc row. It holds no
                 # samples, so it is left out without reading its (unreadable) header.
                 logger.warning("%s has no .etc entries; it holds no indexed samples and is skipped", erd.name)
+                continue
+            order = np.argsort(table[:, 2], kind="stable")
+            k = unrecorded_stamp_step(table[order, 1], table[order, 2])
+            if k:
+                stamps = table[order, 1]
+                self.unrecorded.append(
+                    UnrecordedFile(erd, int(stamps[0]), int(stamps[-1]) + k, int(len(table)), k)
+                )
+                logger.warning(
+                    "%s holds %d decimated samples (one per %d stamps) from outside a recording; left out",
+                    erd.name,
+                    len(table),
+                    k,
+                )
                 continue
             try:
                 header = read_erd_header(erd)
@@ -128,7 +183,10 @@ class NatusLayout:
                 )
             )
             self._etc_tables.append(table)
+        self.unrecorded.sort(key=lambda u: u.start_stamp)
         if not self.files:
+            if self.unrecorded:
+                raise ValueError(f"Only unrecorded (decimated monitoring) data in {self.dirname}")
             raise ValueError(f"No .erd file with an .etc index in {self.dirname}")
 
         self.sync = read_snc_file(listing.snc) if listing.snc is not None else None
