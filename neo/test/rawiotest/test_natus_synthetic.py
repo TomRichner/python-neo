@@ -135,3 +135,15 @@ def test_unrecorded_before_and_between_recordings_is_left_out(tmp_path):
 def test_session_of_unrecorded_data_only_is_an_error(tmp_path):
     with pytest.raises(ValueError, match="Only unrecorded"):
         _parsed(write_session(tmp_path / "only", ["unrecorded", "unrecorded"]))
+
+
+def test_repeated_identical_etc_row_does_not_hide_monitoring_data(tmp_path):
+    folder = write_session(tmp_path / "duplicate", ["unrecorded", "full"])
+    etc = next(folder.glob("*_000.etc"))
+    raw = etc.read_bytes()
+    boundary = GENERIC_HEADER_END + 16 * 7
+    etc.write_bytes(raw[:boundary] + raw[boundary - 16:boundary] + raw[boundary:])
+    reader = _parsed(folder)
+    assert reader.segment_count(0) == 1
+    assert reader.get_signal_size(0, 0, 0) == N
+    assert reader._layout.unrecorded[0].n_samples == N_UNREC

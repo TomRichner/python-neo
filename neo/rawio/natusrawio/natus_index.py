@@ -153,16 +153,20 @@ class NatusLayout:
                 logger.warning("%s has no .etc entries; it holds no indexed samples and is skipped", erd.name)
                 continue
             order = np.argsort(table[:, 2], kind="stable")
-            k = unrecorded_stamp_step(table[order, 1], table[order, 2])
+            ordered = table[order]
+            # Ignore exact repeated index rows for monitoring detection,
+            # preserving the original table for recorded files.
+            unique = ordered[np.r_[True, np.any(ordered[1:] != ordered[:-1], axis=1)]]
+            k = unrecorded_stamp_step(unique[:, 1], unique[:, 2])
             if k:
-                stamps = table[order, 1]
+                stamps = unique[:, 1]
                 self.unrecorded.append(
-                    UnrecordedFile(erd, int(stamps[0]), int(stamps[-1]) + k, int(len(table)), k)
+                    UnrecordedFile(erd, int(stamps[0]), int(stamps[-1]) + k, int(len(unique)), k)
                 )
                 logger.warning(
                     "%s holds %d decimated samples (one per %d stamps) from outside a recording; left out",
                     erd.name,
-                    len(table),
+                    len(unique),
                     k,
                 )
                 continue
