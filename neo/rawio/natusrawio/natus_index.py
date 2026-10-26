@@ -269,10 +269,12 @@ class NatusLayout:
             seg.t_start = t
 
         # 5. overlaps: trim the start of the later segment
+        self.overlap_trims = []  # audit only; existing timing/trim behavior is unchanged
         for a, b in zip(raw[:-1], raw[1:]):
             a_end = a.t_start + a.total / a.rate
             if b.t_start < a_end:
                 b.trimmed = int((a_end - b.t_start) * b.rate)
+                self.overlap_trims.append(dict(start_stamp=b.start_stamp, samples=b.trimmed, rate=b.rate))
                 logger.warning("Segments overlap by %.3f s, trimming %d samples", a_end - b.t_start, b.trimmed)
 
         # 6. final segments with their chunks
@@ -343,6 +345,8 @@ class NatusLayout:
         buf = np.fromfile(f.path, dtype=np.uint8, count=byte1 - byte0, offset=byte0)
         out = decode_range(buf, f.layout, start - int(f.sample_nums[i0]), count)
         if out.shape[0] < count:
+            if getattr(self, "strict_samples", False):
+                raise ValueError("Decoded fewer native samples than indexed; strict mode prohibits padding")
             logger.warning("%s holds fewer samples than indexed; padding with zeros", f.path.name)
             full = np.zeros((count, f.layout.n_rec), dtype=np.int32)
             full[: out.shape[0]] = out
