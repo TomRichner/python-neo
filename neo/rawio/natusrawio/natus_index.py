@@ -343,7 +343,7 @@ class NatusLayout:
         byte0 = int(f.offsets[i0])
         byte1 = int(f.offsets[i1]) if i1 < f.offsets.size else f.size
         buf = np.fromfile(f.path, dtype=np.uint8, count=byte1 - byte0, offset=byte0)
-        out = decode_range(buf, f.layout, start - int(f.sample_nums[i0]), count)
+        out = decode_range(buf, f.layout, start - int(f.sample_nums[i0]), count, strict=getattr(self, "strict_samples", False))
         if out.shape[0] < count:
             if getattr(self, "strict_samples", False):
                 raise ValueError("Decoded fewer native samples than indexed; strict mode prohibits padding")

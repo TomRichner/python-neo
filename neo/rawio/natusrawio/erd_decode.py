@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     HAVE_NUMBA = False
 
 
-def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overflow, start, count):
+def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overflow, start, count, strict=False):
     """Decode packets from buf (uint8, a piece of the sample stream).
 
     buf         uint8 array; byte ``pos`` is the event byte of a packet
@@ -70,6 +70,7 @@ def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overfl
         mpos = pos
         pos += mask_len
         any_over = False
+        truncated = False
         if pos - 1 - mask_len + max_packet <= data_len:
             # Fast path: whole packet surely in the buffer.
             for i in range(n_rec):
@@ -108,6 +109,7 @@ def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overfl
                 bit = (buf[mpos + mask_byte[i]] >> mask_shift[i]) & 1
                 if bit:
                     if pos + 2 > data_len:
+                        truncated = True
                         break
                     v = np.int32(buf[pos]) | (np.int32(buf[pos + 1]) << 8)
                     pos += 2
@@ -120,6 +122,7 @@ def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overfl
                         chan_sums[i] += v
                 else:
                     if pos >= data_len:
+                        truncated = True
                         break
                     b = np.int32(buf[pos])
                     pos += 1
@@ -130,6 +133,7 @@ def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overfl
                 for i in range(n_rec):
                     if overflow[i]:
                         if pos + 4 > data_len:
+                            truncated = True
                             break
                         u = (
                             np.uint32(buf[pos])
@@ -140,6 +144,8 @@ def _decode_packets(buf, pos, mask_len, mask_byte, mask_shift, chan_sums, overfl
                         chan_sums[i] = np.int32(u)
                         pos += 4
                         overflow[i] = 0
+        if strict and truncated:
+            break
         if k >= start:
             for i in range(n_rec):
                 out[n_out, i] = chan_sums[i]
@@ -165,7 +171,7 @@ class ErdLayout:
         self.n_rec = bits.size
 
 
-def decode_range(buf: np.ndarray, layout: ErdLayout, skip: int, count: int) -> np.ndarray:
+def decode_range(buf: np.ndarray, layout: ErdLayout, skip: int, count: int, strict: bool = False) -> np.ndarray:
     """Decode ``count`` samples after skipping ``skip``, starting at buf[0] with zero state.
 
     ``buf`` must start at an ``.etc`` index point (all channels absolute there).
@@ -176,6 +182,6 @@ def decode_range(buf: np.ndarray, layout: ErdLayout, skip: int, count: int) -> n
     chan_sums = np.zeros(layout.n_rec, dtype=np.int32)
     overflow = np.zeros(layout.n_rec, dtype=np.uint8)
     out, n, _ = decode_packets(
-        buf, 0, layout.mask_len, layout.mask_byte, layout.mask_shift, chan_sums, overflow, skip, count
+        buf, 0, layout.mask_len, layout.mask_byte, layout.mask_shift, chan_sums, overflow, skip, count, strict
     )
     return out[:n]
