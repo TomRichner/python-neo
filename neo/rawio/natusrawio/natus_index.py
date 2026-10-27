@@ -312,6 +312,117 @@ class NatusLayout:
             raise ValueError(f"No recorded data found in {self.dirname}")
         return segments
 
+    def recover_truncated_tails(self):
+        """Split indexed spans around incomplete EOF tails, without filling samples.
+
+        Only the final ETC block of each participating ERD is inspected. Interior
+        short reads remain fatal. Split times retain the original segment anchor.
+        This opt-in pass must run before RawIO constructs its header/segment maps.
+        """
+        if hasattr(self, 'tail_gaps'):
+            return self.tail_gaps
+        from .erd_decode import decode_packets
+        from .natus_files import FULL_RATE_FREQUENCY_FACTOR, SAMPLE_PACKET_OFFSET
+
+        ends = {}
+        for segment in self.segments:
+            for fi, start, count in segment.chunks:
+                ends[fi] = max(ends.get(fi, 0), start + count)
+        cuts, tails = {}, {}
+        stc_spans = self._stc_spans()
+        for fi, end in ends.items():
+            f = self.files[fi]
+            table = self._etc_tables[fi]
+            if (np.any(np.diff(f.offsets) <= 0) or np.any(np.diff(f.sample_nums) <= 0)):
+                raise ValueError('Tail recovery requires increasing ETC byte/sample offsets')
+            if any(f.header.frequency_factor[i - 1] != FULL_RATE_FREQUENCY_FACTOR
+                   for i in f.header.rec_to_phys_map):
+                raise ValueError('Tail recovery does not support per-channel frequency factors')
+            first = int(f.sample_nums[-1])
+            offset = int(f.offsets[-1])
+            expected = end - first
+            if expected <= 0:
+                continue
+            if offset < SAMPLE_PACKET_OFFSET or offset > f.size:
+                raise ValueError('Final ETC byte offset lies outside the ERD payload')
+            complete = 0
+            if offset < f.size:
+                buf = np.memmap(f.path, dtype=np.uint8, mode='r', offset=offset, shape=(f.size-offset,))
+                sums = np.zeros(f.layout.n_rec, dtype=np.int32)
+                overflow = np.zeros(f.layout.n_rec, dtype=np.uint8)
+                pos = 0
+                rows = max(1, min(4096, (8 << 20) // max(1, 4 * f.layout.n_rec)))
+                try:
+                    while complete < expected:
+                        count = min(rows, expected - complete)
+                        _, n, pos = decode_packets(buf, pos, f.layout.mask_len, f.layout.mask_byte,
+                                                   f.layout.mask_shift, sums, overflow, 0, count, True)
+                        complete += int(n)
+                        if n < count:
+                            break
+                finally:
+                    buf._mmap.close()
+            if complete < expected:
+                declared_end = stc_spans.get(f.path.stem.lower())
+                evidence = 'STC'
+                if declared_end is None and int(table[-1, 3]) > 0:
+                    declared_end = first + int(table[-1, 3])
+                    evidence = 'ETC_sample_span'
+                if declared_end is None or declared_end < end:
+                    raise ValueError('Cannot recover EOF tail without a corroborated indexed extent')
+                cuts[fi] = (first + complete, end)
+                tails[fi] = dict(indexed_tail_samples=expected, complete_tail_samples=complete, extent_evidence=evidence)
+
+        recovered, gaps = [], []
+        for segment in self.segments:
+            chunks, first_offset, retained, cursor = [], 0, 0, 0
+
+            def flush():
+                nonlocal chunks, retained
+                if retained:
+                    recovered.append(Segment(segment.rate, segment.stream_key,
+                        segment.start_stamp + first_offset,
+                        segment.t_start_posix + first_offset / segment.rate,
+                        retained, list(chunks)))
+                chunks, retained = [], 0
+
+            for fi, start, count in segment.chunks:
+                end = start + count
+                a, b = cuts.get(fi, (end, end))
+                lo, hi = max(start, a), min(end, b)
+                kept = [(start, end)] if lo >= hi else [(start, lo), (hi, end)]
+                if lo < hi:
+                    at = cursor + lo - start
+                    gaps.append(dict(reason='incomplete_erd_tail', file_index=fi,
+                        start_stamp=segment.start_stamp + at, stop_stamp=segment.start_stamp + at + hi - lo,
+                        sample_count=hi-lo, rate=segment.rate,
+                        start_posix=segment.t_start_posix + at / segment.rate,
+                        stop_posix=segment.t_start_posix + (at + hi-lo) / segment.rate,
+                        **tails[fi]))
+                for left, right in kept:
+                    if right <= left:
+                        continue
+                    at = cursor + left - start
+                    if retained and first_offset + retained != at:
+                        flush()
+                    if not retained:
+                        first_offset = at
+                    if chunks and chunks[-1][0] == fi and chunks[-1][1] + chunks[-1][2] == left:
+                        old = chunks[-1]
+                        chunks[-1] = (fi, old[1], old[2] + right-left)
+                    else:
+                        chunks.append((fi, left, right-left))
+                    retained += right-left
+                cursor += count
+            flush()
+        if not recovered:
+            raise ValueError('No complete native samples remain after EOF-tail recovery')
+        self.segments = recovered
+        self.tail_gaps = gaps
+        self.strict_samples = True
+        return gaps
+
+
     # ------------------------------------------------------------------
     def stamp_rate(self, stamp: int) -> float:
         """Sample rate in force at a samplestamp (for .snc interpolation)."""

@@ -75,6 +75,10 @@ class NatusRawIO(BaseRawIO):
         The session folder (the one holding the ``.erd``, ``.etc``, ``.stc``,
         ``.snc`` and ``.ent`` files).
 
+    recover_truncated_tails: bool, default False
+        Inspect final indexed ERD blocks; omit incomplete EOF samples and
+        represent their time as gaps. Complete reads remain strict.
+
     Examples
     --------
     >>> import neo.rawio
@@ -94,10 +98,11 @@ class NatusRawIO(BaseRawIO):
     # run get_analogsignal_chunk from several threads at once.
     thread_safe_reads = True
 
-    def __init__(self, dirname: str | Path = ""):
+    def __init__(self, dirname: str | Path = "", *, recover_truncated_tails: bool = False):
         if not HAVE_NUMBA:
             raise ImportError("NatusRawIO needs numba: pip install neo[natus]")
         self.dirname = str(dirname)
+        self.recover_truncated_tails = recover_truncated_tails
         BaseRawIO.__init__(self)
 
     def _source_name(self):
@@ -108,6 +113,8 @@ class NatusRawIO(BaseRawIO):
         from .natus_index import NatusLayout
 
         layout = NatusLayout(self.dirname)
+        if self.recover_truncated_tails:
+            layout.recover_truncated_tails()
         self._layout = layout
         segments = layout.segments
         self._segments = segments
